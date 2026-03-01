@@ -18,9 +18,9 @@ WorkingDirectory=/home/YOUR_USER/fetch2gmail
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=fetch2gmail
-# If installed via pip: ExecStart=/usr/local/bin/fetch2gmail run
-# From source (WorkingDirectory = repo root): ExecStart=/usr/bin/python3 -m fetcher.cli run
-ExecStart=/usr/local/bin/fetch2gmail run
+# pipx (recommended): ExecStart=/home/YOUR_USER/.local/bin/fetch2gmail run
+# Venv in data dir: ExecStart=/home/YOUR_USER/fetch2gmail/.venv/bin/fetch2gmail run
+ExecStart=/home/YOUR_USER/.local/bin/fetch2gmail run
 # Restart not used for oneshot
 
 [Install]

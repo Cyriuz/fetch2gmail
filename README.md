@@ -25,22 +25,29 @@ Self-hosted email fetcher: **IMAP (ISP mailbox) → Gmail API import**. Replaces
 
 Do this on a **laptop or desktop** that has a browser. You’ll get **credentials.json** (from Google) and **token.json** (from one-time sign-in). You’ll copy both to your server later. Google OAuth does not allow redirect URIs that use an IP address, so the token must be obtained on a machine where the app can use `http://127.0.0.1:8765`.
 
-### Step 1. Install Python 3.11+
+### Step 1. Install Python 3.11+ and pipx (recommended) or venv
 
-- **Windows**: Download and install from [python.org](https://www.python.org/downloads/). Ensure “Add Python to PATH” is checked.
-- **Linux**: e.g. `sudo apt install python3 python3-pip python3-venv` (Debian/Ubuntu).
+- **Windows**: Install [Python 3.11+](https://www.python.org/downloads/) (check “Add Python to PATH”). Then install **pipx** (needed for Option A below): open Command Prompt or PowerShell and run `pip install pipx` then `pipx ensurepath`. Close and reopen the terminal so `fetch2gmail` will be on your PATH. (Alternatively, use Option B and a venv.)
+- **Linux (Debian/Ubuntu, etc.)**: Many distros use an “externally managed” system Python, so **`pip install fetch2gmail`** will fail. Use **pipx** (recommended) or a venv:
+  ```bash
+  sudo apt install pipx
+  pipx ensurepath   # then reopen your terminal so `fetch2gmail` is on PATH
+  ```
+  Or install Python and venv: `sudo apt install python3 python3-venv` (for Option B below).
 
 ### Step 2. Install fetch2gmail
 
-Either use PyPI (if the package is published) or clone the repo:
+**Option A — from PyPI with pipx (recommended on Linux/macOS/Windows):**
 
-**Option A — from PyPI:**
+pipx installs the app in an isolated environment and puts the `fetch2gmail` command on your PATH. It works even when system Python is externally managed (e.g. Debian/Ubuntu).
+
 ```bash
-pip install fetch2gmail
+pipx install fetch2gmail
 ```
-(On Linux you may prefer `pip install --user fetch2gmail` so you don’t need admin.)
 
-**Option B — from source:**
+After that, run `fetch2gmail auth` from any directory (e.g. the folder where you saved **credentials.json**).
+
+**Option B — from source (e.g. to try unreleased changes):**
 ```bash
 git clone https://github.com/yourusername/fetch2gmail.git
 cd fetch2gmail
@@ -53,6 +60,7 @@ source .venv/bin/activate
 # .venv\Scripts\activate.bat
 pip install -e .
 ```
+Then use that terminal (with venv active) when you run `fetch2gmail auth`.
 
 ### Step 3. Create Google OAuth credentials (Web application)
 
@@ -89,6 +97,16 @@ You now have:
 
 Copy both to your server and put them in the **data directory** where the app will run (see Part 2). Do not commit them to git; keep them private.
 
+### Uninstall on this computer (optional)
+
+Once you’ve copied **credentials.json** and **token.json** to the server, you can remove fetch2gmail from this machine if you don’t need it here anymore.
+
+- **If you used pipx:**  
+  `pipx uninstall fetch2gmail`
+- **If you installed from source in a venv:** delete the project folder (e.g. `rm -rf ~/fetch2gmail`); the venv and app go with it.
+
+You can reinstall later (e.g. with pipx) if you need to run `fetch2gmail auth` again (for example to reconnect a different Gmail account or refresh the token).
+
 ---
 
 ## Part 2: Install on the server (Odroid, Raspberry Pi, etc.) and run as a system service
@@ -119,13 +137,15 @@ So this directory should contain at least: **config.json**, **credentials.json**
 
 ### Step 3. Install fetch2gmail on the server
 
-**Option A — global install (simplest):**
+On Debian/Ubuntu and similar, system Python is often “externally managed”, so **`pip install fetch2gmail`** can fail. Use **pipx** or a **venv** instead.
+
+**Option A — pipx (recommended):**
 ```bash
-pip install fetch2gmail
-# or, without sudo, so it’s per-user:
-pip install --user fetch2gmail
+sudo apt install pipx   # if needed
+pipx ensurepath        # then log out/in or source your shell rc so PATH includes ~/.local/bin
+pipx install fetch2gmail
 ```
-Use the binary path in systemd: `/usr/local/bin/fetch2gmail` or `$HOME/.local/bin/fetch2gmail` if you used `--user`.
+The binary is at **`~/.local/bin/fetch2gmail`**. In systemd use e.g. `ExecStart=/home/odroid/.local/bin/fetch2gmail run` (replace `odroid` with your service user).
 
 **Option B — venv in the data directory (isolated):**
 ```bash
@@ -356,7 +376,7 @@ Open **http://127.0.0.1:8765**. You can change IMAP/Gmail settings (including pa
 
 If you already use virtual environments and know the basics:
 
-1. **Clone and install** (with a venv):
+1. **Install**: **`pipx install fetch2gmail`** (recommended), or clone and use a venv:
    ```bash
    cd fetch2gmail
    python3 -m venv .venv && source .venv/bin/activate   # or .venv\Scripts\activate on Windows
@@ -459,7 +479,7 @@ So: **same folder as `config.json`** is the single place for config, credentials
 
 ### Install on the server: venv vs global
 
-- **Global (simplest):** `pip install fetch2gmail` (or `pip install --user fetch2gmail`). Then run `fetch2gmail run` or `fetch2gmail serve` from your data directory, or point systemd at the global binary (e.g. `/usr/local/bin/fetch2gmail`).
+- **pipx (recommended on Debian/Ubuntu):** `pipx install fetch2gmail` — installs in an isolated env and avoids “externally managed” errors. Binary at `~/.local/bin/fetch2gmail`. Use that path in systemd `ExecStart`.
 - **Venv (isolated):** Create a venv inside your data directory so the app and its deps don’t touch system Python:
   ```bash
   mkdir -p /opt/fetch2gmail && cd /opt/fetch2gmail
@@ -485,8 +505,8 @@ Either way, **WorkingDirectory** must be that data directory so the app finds co
    - **WorkingDirectory=** — your data directory (e.g. `/opt/fetch2gmail` or `/home/odroid/fetch2gmail`).
    - **Environment=FETCH2GMAIL_CONFIG=** — full path to `config.json` (e.g. `/opt/fetch2gmail/config.json`).
    - **ExecStart=** — path to `fetch2gmail run`:
-     - Global install: `ExecStart=/usr/local/bin/fetch2gmail run` (or `ExecStart=/home/odroid/.local/bin/fetch2gmail run` if you used `pip install --user`).
-     - Venv in data dir: `ExecStart=/opt/fetch2gmail/.venv/bin/fetch2gmail run`.
+     - **pipx:** `ExecStart=/home/odroid/.local/bin/fetch2gmail run` (replace `odroid` with your User).
+     - **Venv in data dir:** `ExecStart=/opt/fetch2gmail/.venv/bin/fetch2gmail run`.
    - Optionally **Environment=IMAP_PASSWORD=** if you don’t use `.env`.
 
 2. Reload, enable and start the timer:
@@ -510,7 +530,7 @@ Google OAuth **does not accept redirect URIs that use an IP address** (e.g. `htt
 **Use the `auth` command on a machine with a browser (like rclone’s authorize flow):**
 
 1. **On any Linux or Windows machine** (laptop, desktop) where you can open a browser:
-   - **Get the app**: clone the repo and install (e.g. **`git clone <repo-url> && cd fetch2gmail && pip install .`**). If the package is available on PyPI, **`pip install fetch2gmail`** instead.
+   - **Get the app**: **`pipx install fetch2gmail`** (recommended; works on externally-managed Python). Or clone and use a venv: **`git clone <repo-url> && cd fetch2gmail && python3 -m venv .venv && source .venv/bin/activate && pip install -e .`**
    - In GCP, create an OAuth **Web application** client and add **only** **`http://127.0.0.1:8765/auth/gmail/callback`** (and optionally `http://localhost:8765/auth/gmail/callback`). Download the JSON and save as **credentials.json** in a folder (e.g. your desktop or home).
    - In that folder, run: **`fetch2gmail auth`**  
      A browser will open at http://127.0.0.1:8765. Sign in with Google; when done, **token.json** is saved in the same folder. Press Ctrl+C to stop the auth server.
@@ -521,7 +541,7 @@ Google OAuth **does not accept redirect URIs that use an IP address** (e.g. `htt
    Put them in the **data directory** where the app runs (same folder as `config.json`; see [Where to put config and secrets on the server](#where-to-put-config-and-secrets-on-the-server)).
 3. **On the Odroid**, run Fetch2Gmail (e.g. systemd timer for fetch, and optionally `fetch2gmail serve` for the UI). Open the UI at **http://192.168.1.38:8765** (if the UI is bound to that host). Use the dashboard (config, fetch, logs) as usual. No “Sign in with Google” on the device; **token.json** is used for Gmail. If you ever click “Reconnect Gmail”, run **`fetch2gmail auth`** again on the laptop and copy **token.json** back.
 
-So: **Get Fetch2Gmail on a laptop/PC (clone and pip install, or pip install from PyPI if available), run `fetch2gmail auth`, then copy the two files to the headless device.**
+So: **On a laptop/PC run `pipx install fetch2gmail` (or install from source in a venv), then `fetch2gmail auth`; copy credentials.json and token.json to the headless device.**
 
 ---
 
@@ -615,7 +635,7 @@ fetch2gmail/
 ## Fork and run on your own Debian / Odroid
 
 1. Clone: `git clone https://github.com/yourusername/fetch2gmail.git && cd fetch2gmail`
-2. Install: create a venv and `pip install -e .` (or from PyPI: `pip install fetch2gmail`).
+2. Install: **`pipx install fetch2gmail`** (recommended), or create a venv and `pip install -e .`.
 3. Create Google Cloud project, enable Gmail API, create OAuth **Web application** credentials → save as `credentials.json` in your data directory.
 4. Run once to get refresh token: from the directory that has `config.json`, run `fetch2gmail run` (browser opens for sign-in; then `token.json` is created there). Or use `fetch2gmail auth` on a laptop and copy `credentials.json` and `token.json` to the server (see [Headless or LAN-only](#headless-or-lan-only-eg-odroid)).
 5. Copy and edit systemd units from `systemd/`; set `User`, `Group`, `WorkingDirectory` (your data directory), `FETCH2GMAIL_CONFIG`, and `ExecStart` (path to `fetch2gmail run`). See [Deployment](#deployment).
