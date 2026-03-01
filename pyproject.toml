@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fetch2gmail"
-version = "1.0.0"
+version = "1.0.1"
 description = "Self-hosted email fetcher: IMAP to Gmail API import with idempotent state tracking"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Fetch2Gmail Contributors" }]
 keywords = ["email", "imap", "gmail", "fetch", "self-hosted"]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
