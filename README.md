@@ -264,6 +264,17 @@ To run from a git clone (e.g. to test changes before pushing):
    - `fetch2gmail auth` — get token (put **credentials.json** in the current directory first)
    - `fetch2gmail run` or `fetch2gmail run --dry-run` — if you have **config.json** and secrets set up
 
+**Testing the UI locally (no need to reinstall or touch the service):** To try code changes without stopping the system service or reinstalling, run the UI from your clone on a **different port** so it doesn’t conflict with the service. Point the app at your data directory (where your config, credentials, token, and `.ui_auth` live) so it finds everything:
+
+```bash
+cd /path/to/your/fetch2gmail   # your git clone
+source .venv/bin/activate      # or .venv\Scripts\activate on Windows
+pip install -e .               # if you haven’t already (editable = your changes are used)
+FETCH2GMAIL_CONFIG=/path/to/your/data/config.json fetch2gmail serve --port 8766
+```
+
+Replace `/path/to/your/data` with your actual data directory (e.g. `/opt/fetch2gmail` or `~/fetch2gmail`). Then open **http://127.0.0.1:8766** in your browser. The system service (if it’s running) stays on 8765; this process uses your local code. Edit code, restart this command, and refresh the browser to test. If you prefer to use port 8765, stop the service first (`sudo systemctl stop fetch2gmail`), run `fetch2gmail serve` (no `--port`), then start the service again when you’re done.
+
 5. **Before pushing: test the build** so the package still builds and you catch errors:
    ```bash
    pip install build
