@@ -1,4 +1,5 @@
-# Publish to PyPI when a release is created. Add PYPI_API_TOKEN to repo Secrets.
+# Publish to PyPI when a release is published. Uses Trusted Publishing (no API token).
+# On PyPI: add this repo as a Trusted Publisher (owner, repo name, workflow: publish-pypi.yml).
 name: Publish to PyPI
 
 on:
@@ -8,6 +9,8 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for PyPI Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
 
@@ -24,5 +27,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
