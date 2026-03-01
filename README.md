@@ -198,6 +198,16 @@ All app files live in **one directory**: **config.json**, **credentials.json**, 
 - On the server, the UI is protected by the username and password you set with **`fetch2gmail set-ui-password`** (stored as a hash in **.ui_auth**). There is no Google sign-in on the server when **token.json** is already there.
 - The Gmail scope requested is **gmail.modify** (read and modify labels/messages only).
 
+### Troubleshooting
+
+To see what the service is doing (background poller, fetch results, errors), stream the logs:
+
+```bash
+journalctl -u fetch2gmail -f
+```
+
+You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch now", and "Background fetch: imported=...". Use **Ctrl+C** to stop following.
+
 ### CLI
 
 | Command | Purpose |
