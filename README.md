@@ -237,6 +237,7 @@ You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch no
 
 | Command | Purpose |
 |--------|---------|
+| `fetch2gmail --version` | Show installed version. |
 | `fetch2gmail auth` | Get **token.json** on a machine with a browser (opens http://127.0.0.1:8765). |
 | `fetch2gmail set-ui-password` | Set UI username and password (hash in **.ui_auth**). |
 | `fetch2gmail install-service` | Generate systemd unit file (one service: web UI + background fetch). Use `--user`, `--dir`, and optionally `--output` or pipe to `sudo tee`. |
@@ -253,6 +254,8 @@ You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch no
   - **`FETCH2GMAIL_CONFIG=/path/to/config.json`** — Use a different data directory. The path must be the **full path to config.json** inside that directory; the app will look for credentials, token, and .env in the same directory. Use this when you run `fetch2gmail serve` from one place (e.g. your git clone) but want to use config and data from another (e.g. `/home/sarah/Desktop/config.json`).
 
 ### Updating
+
+To check your installed version: **`fetch2gmail --version`**.
 
 If you installed with **pipx**, upgrade to the latest release with:
 
