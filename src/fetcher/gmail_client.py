@@ -47,7 +47,7 @@ def get_gmail_service(credentials_path: str | Path, token_path: str | Path):
             creds = flow.run_local_server(port=0)
         with open(tok_path, "w", encoding="utf-8") as f:
             f.write(creds.to_json())
-    return build("gmail", "v1", credentials=creds)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
 def _parse_date_from_raw(raw: bytes) -> str | None:

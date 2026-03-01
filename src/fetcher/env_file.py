@@ -4,7 +4,7 @@ import base64
 import re
 from pathlib import Path
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from .auth_ui import get_or_create_cookie_secret
 
@@ -45,5 +45,11 @@ def set_encrypted_env(config_dir: Path, key: str, value: str) -> None:
 
 def decrypt_env_value(config_dir: Path, encrypted_b64: str) -> str:
     """Decrypt a value stored with set_encrypted_env."""
-    fernet = _fernet_for_config_dir(config_dir)
-    return fernet.decrypt(encrypted_b64.encode("ascii")).decode("utf-8")
+    try:
+        fernet = _fernet_for_config_dir(config_dir)
+        return fernet.decrypt(encrypted_b64.encode("ascii")).decode("utf-8")
+    except InvalidToken:
+        raise ValueError(
+            "IMAP password could not be decrypted (encryption key may have changed, e.g. different config dir or .cookie_secret). "
+            "Re-enter the IMAP password in the UI Config section to fix."
+        ) from None

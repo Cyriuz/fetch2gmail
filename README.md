@@ -77,18 +77,14 @@ pipx ensurepath
 pipx install fetch2gmail
 ```
 
-The app will find your token and files in `/opt/fetch2gmail` because in step 9 you install a single systemd service that sets **WorkingDirectory** and **FETCH2GMAIL_CONFIG** to that directory. For step 8 you **cd** into `/opt/fetch2gmail` before running `set-ui-password` so the password file is stored there.
+The app will find your token and files in `/opt/fetch2gmail` because in step 9 you install a single systemd service that sets **WorkingDirectory** and **FETCH2GMAIL_CONFIG** to that directory. If you set the UI password from the CLI (step 8), **cd** into `/opt/fetch2gmail` first so **.ui_auth** is created there.
 
 **Step 8. Set the UI username and password**
 
-Run once so only you can access the web UI (username and hashed password are stored in **.ui_auth**):
+The web UI is protected by a username and password (stored as a hash in **.ui_auth**). You can set it from the CLI or from the UI:
 
-```bash
-cd /opt/fetch2gmail
-fetch2gmail set-ui-password
-```
-
-Enter a username and password when prompted.
+- **From the CLI:** Run `cd /opt/fetch2gmail` then `fetch2gmail set-ui-password` and enter username and password when prompted.
+- **From the UI:** If **.ui_auth** does not exist yet, open the web UI and you will see the Set UI password wizard. Set a username and password there; after that, the UI will require them (HTTP Basic Auth). You cannot create config or use the app until a UI password is set.
 
 **Step 9. Install and enable the systemd service (one service: web UI + background fetch)**
 
@@ -123,7 +119,7 @@ Open **http://\<server-ip\>:8765** in your browser (e.g. http://192.168.1.10:876
 
 ## Use case 2: Device with a browser (one machine)
 
-Everything runs on **one machine** (laptop or desktop) that has a browser. You sign in with Google in the web UI — the redirect works because you open the UI on localhost. You do **not** need to run `fetch2gmail auth` or set a UI password. Follow the steps in order.
+Everything runs on **one machine** (laptop or desktop) that has a browser. You get **token.json** via **`fetch2gmail auth`** (CLI); the web UI does not have "Sign in with Google". Then set a UI password and configure ISP mail in the UI. Follow the steps in order.
 
 **Step 1. Get credentials.json from Google Cloud**
 
@@ -150,7 +146,11 @@ mkdir -p ~/fetch2gmail
 
 Use the same path in the steps below (replace `~/fetch2gmail` if you use something else).
 
-**Step 5. Install and enable the systemd service**
+**Step 5. Get token.json (CLI)**
+
+**cd** into your data directory and run **`fetch2gmail auth`**. A browser opens; sign in with the Gmail account that will receive the imported mail and click Allow. **token.json** is saved in that folder. Press **Ctrl+C** to stop the auth server.
+
+**Step 6. Install and enable the systemd service**
 
 Same as Use case 1, step 9: one service (web UI + background fetch). Replace **YOUR_USER** and the path with yours:
 
@@ -161,13 +161,9 @@ sudo systemctl enable fetch2gmail
 sudo systemctl start fetch2gmail
 ```
 
-**Step 6. Sign in with Google in the web UI**
+**Step 7. Set UI password and configure ISP mail**
 
-Open **http://127.0.0.1:8765** in your browser (**use localhost** so the Google OAuth redirect works). You will see **Sign in with Google** — click it, sign in with the Gmail account that will receive the imported mail, and click Allow. The app saves **token.json** in your data directory. You are now signed in.
-
-**Step 7. Configure ISP mail in the web UI**
-
-Use the **initial setup** form to enter your IMAP host, username, password, mailbox, and Gmail label, then click **Create config**. The app stores your password securely and the timer runs the fetch on the schedule you set (every 5 minutes by default).
+Open **http://127.0.0.1:8765** in your browser. If **.ui_auth** does not exist yet, you will see the Set UI password wizard; set a username and password there (or run `fetch2gmail set-ui-password` from the CLI). Then use the **initial setup** form to enter your IMAP host, username, password, mailbox, and Gmail label, and click **Create config**. The app stores your password securely and the timer runs the fetch on the schedule you set (every 5 minutes by default).
 
 **Done.**
 
@@ -195,7 +191,7 @@ All app files live in **one directory**: **config.json**, **credentials.json**, 
 ### Security
 
 - Do not commit **credentials.json**, **token.json**, or **config.json** with secrets. Restrict file permissions to the user running the service.
-- On the server, the UI is protected by the username and password you set with **`fetch2gmail set-ui-password`** (stored as a hash in **.ui_auth**). There is no Google sign-in on the server when **token.json** is already there.
+- The UI is protected by a username and password in **.ui_auth** (when set). Get **token.json** via **`fetch2gmail auth`** (CLI only; there is no "Sign in with Google" in the UI).
 - The Gmail scope requested is **gmail.modify** (read and modify labels/messages only).
 
 ### Multiple accounts (multiple instances)
@@ -227,6 +223,8 @@ One instance = one IMAP mailbox → one Gmail account. To run **multiple account
 
 ### Troubleshooting
 
+**"Background fetch skipped: IMAP password could not be decrypted"** — The encrypted IMAP password in **.env** was created with a different encryption key (e.g. different config directory or **.cookie_secret**). Re-enter the IMAP password in the UI (Config section) and Save to re-encrypt it.
+
 To see what the service is doing (background poller, fetch results, errors), stream the logs:
 
 ```bash
@@ -242,9 +240,17 @@ You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch no
 | `fetch2gmail auth` | Get **token.json** on a machine with a browser (opens http://127.0.0.1:8765). |
 | `fetch2gmail set-ui-password` | Set UI username and password (hash in **.ui_auth**). |
 | `fetch2gmail install-service` | Generate systemd unit file (one service: web UI + background fetch). Use `--user`, `--dir`, and optionally `--output` or pipe to `sudo tee`. |
-| `fetch2gmail serve` | Run the web UI (default: localhost only; use `--host 0.0.0.0` to bind to all interfaces). |
+| `fetch2gmail serve` | Run the web UI. By default uses the **current directory** for config, credentials, and token; use `--port` and `--host` as needed. See below. |
 | `fetch2gmail run` | Run one fetch cycle. |
 | `fetch2gmail run --dry-run` | Connect to ISP and show what would be imported; no Gmail import, no delete. |
+
+**`fetch2gmail serve` — defaults and options**
+
+- **Default:** The app uses the **current working directory** as the data directory: it looks for **config.json**, **credentials.json**, **token.json**, and **.env** in the directory you run the command from. So from a folder that already has those (or at least credentials and token), run `fetch2gmail serve` and open http://127.0.0.1:8765.
+- **Options:**
+  - **`--port 8766`** — Use a different port (default 8765). Useful if 8765 is in use or you run multiple instances.
+  - **`--host 0.0.0.0`** — Bind to all interfaces (e.g. to reach the UI from another device on the LAN). Default is 127.0.0.1 (localhost only).
+  - **`FETCH2GMAIL_CONFIG=/path/to/config.json`** — Use a different data directory. The path must be the **full path to config.json** inside that directory; the app will look for credentials, token, and .env in the same directory. Use this when you run `fetch2gmail serve` from one place (e.g. your git clone) but want to use config and data from another (e.g. `/home/sarah/Desktop/config.json`).
 
 ### Uninstall
 
@@ -296,21 +302,12 @@ To run from a git clone (e.g. to test changes before pushing):
    ```
    Optional, for tests: `pip install -e ".[dev]"`
 
-4. **Run and test** (use the same terminal with the venv active):
-   - `fetch2gmail serve` — web UI at http://127.0.0.1:8765
-   - `fetch2gmail auth` — get token (put **credentials.json** in the current directory first)
-   - `fetch2gmail run` or `fetch2gmail run --dry-run` — if you have **config.json** and secrets set up
+4. **Run and test** (use the same terminal with the venv active; no pipx needed—the editable install provides the `fetch2gmail` command):
+   - **`fetch2gmail serve`** — Run the web UI. **Default: uses the current directory** for config, credentials, and token. So put **credentials.json** and **token.json** in your project directory (or any folder), **cd** there, run `fetch2gmail serve`, and open http://127.0.0.1:8765. Optionally add **`--port 8766`** to use another port. No need to set `FETCH2GMAIL_CONFIG` when you run from the directory that has your data.
+   - **`fetch2gmail auth`** — Get token. **cd** into the directory that has **credentials.json** (or pass `--credentials` and `--token`), then run it; a browser opens for Google sign-in and **token.json** is written there. Use **`--port 8766`** if 8765 is in use.
+   - **`fetch2gmail run`** or **`fetch2gmail run --dry-run`** — If you have **config.json** and secrets set up (again, run from the data directory or set `FETCH2GMAIL_CONFIG`).
 
-**Testing the UI locally (no need to reinstall or touch the service):** To try code changes without stopping the system service or reinstalling, run the UI from your clone on a **different port** so it doesn’t conflict with the service. Point the app at your data directory (where your config, credentials, token, and `.ui_auth` live) so it finds everything:
-
-```bash
-cd /path/to/your/fetch2gmail   # your git clone
-source .venv/bin/activate      # or .venv\Scripts\activate on Windows
-pip install -e .               # if you haven’t already (editable = your changes are used)
-FETCH2GMAIL_CONFIG=/path/to/your/data/config.json fetch2gmail serve --port 8766
-```
-
-Replace `/path/to/your/data` with your actual data directory (e.g. `/opt/fetch2gmail` or `~/fetch2gmail`). Then open **http://127.0.0.1:8766** in your browser. The system service (if it’s running) stays on 8765; this process uses your local code. Edit code, restart this command, and refresh the browser to test. If you prefer to use port 8765, stop the service first (`sudo systemctl stop fetch2gmail`), run `fetch2gmail serve` (no `--port`), then start the service again when you’re done.
+**Using a different data directory:** If you want to run `fetch2gmail serve` from your git clone but use config and data from another folder (e.g. **credentials.json** and **token.json** on your Desktop), set **`FETCH2GMAIL_CONFIG`** to the full path to **config.json** in that folder (e.g. `FETCH2GMAIL_CONFIG=/home/sarah/Desktop/config.json`). **config.json** does not need to exist yet—the UI creates it when you complete the setup form.
 
 5. **Before pushing: test the build** so the package still builds and you catch errors:
    ```bash

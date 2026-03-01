@@ -1,45 +1,43 @@
 """
-Lightweight FastAPI web UI: localhost only by default. OAuth only (no username/password).
-- credentials.json required first; landing page with "Sign in with Google" button.
-- After sign-in, configure ISP email (setup wizard or dashboard).
-- Optional: run `fetch2gmail set-ui-password` to store a hashed UI password in .ui_auth (no plain text); then the UI requires HTTP Basic Auth (e.g. when using --host 0.0.0.0).
+Lightweight FastAPI web UI: localhost only by default.
+- Auth: UI password only (.ui_auth). When absent, allow access so user can set it (token must exist).
+- Get token.json via CLI: fetch2gmail auth (not in the UI).
+- credentials.json required first; then run fetch2gmail auth for token; then create config in the UI or use the dashboard.
 """
 
 import base64
 import json
 import logging
 import os
-import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response as RawResponse
 from pydantic import BaseModel
 
-from .auth_ui import (
-    auth_required,
-    clear_session_cookie,
-    set_session_cookie,
-    verify_request,
-)
+import imaplib
+
 from .config import get_config_path, load_config
-from .ui_auth import load_ui_auth, verify_ui_auth
 from .env_file import set_encrypted_env
 from .gmail_client import get_gmail_service
+from .imap_client import get_uid_validity
 from .log_buffer import get_recent_logs, install_log_buffer
 from .run import run_once, setup_logging
+from .ui_auth import create_ui_auth, load_ui_auth, verify_ui_auth
 
 logger = logging.getLogger(__name__)
 
 
 def _poller_loop(stop_event: threading.Event) -> None:
-    """Background thread: every poll_interval_minutes run a fetch when config exists."""
-    first_run = True
+    """Background thread: every poll_interval_minutes run a fetch when config exists.
+    Re-reads config every 10s so changing poll_interval_minutes in the UI takes effect without restart.
+    """
+    last_run_at: float | None = None
     while not stop_event.is_set():
         try:
             if not _config_exists():
@@ -48,19 +46,32 @@ def _poller_loop(stop_event: threading.Event) -> None:
             path = _get_config_path()
             cfg = load_config(path, resolve_password=False)
             interval_minutes = max(1, int(cfg.get("poll_interval_minutes", 5)))
+            interval_seconds = interval_minutes * 60
         except Exception as e:
             logger.warning("Poller could not load config: %s", e)
             stop_event.wait(timeout=60)
             continue
-        # First run: short delay (30s) so we fetch soon after startup; then use full interval
-        wait_seconds = 30 if first_run else interval_minutes * 60
-        first_run = False
-        waited = 0
-        while waited < wait_seconds and not stop_event.is_set():
+        now = time.monotonic()
+        if last_run_at is None:
+            # First run: short delay (30s) so we fetch soon after startup
+            next_run_at = now + 30
+        else:
+            next_run_at = last_run_at + interval_seconds
+        # Wait in 10s chunks and re-read config each wake so interval changes apply without restart
+        while not stop_event.is_set() and time.monotonic() < next_run_at:
             stop_event.wait(timeout=10)
-            waited += 10
+            # Re-read interval so UI changes take effect within ~10s
+            try:
+                if _config_exists() and last_run_at is not None:
+                    cfg = load_config(_get_config_path(), resolve_password=False)
+                    interval_minutes = max(1, int(cfg.get("poll_interval_minutes", 5)))
+                    interval_seconds = interval_minutes * 60
+                    next_run_at = last_run_at + interval_seconds
+            except Exception:
+                pass
         if stop_event.is_set():
             break
+        last_run_at = time.monotonic()
         try:
             setup_logging()
             install_log_buffer()
@@ -74,6 +85,8 @@ def _poller_loop(stop_event: threading.Event) -> None:
                     result.get("skipped_duplicate", 0),
                     result.get("deleted", 0),
                 )
+        except ValueError as e:
+            logger.warning("Background fetch skipped: %s", e)
         except Exception as e:
             logger.exception("Background fetch failed: %s", e)
 
@@ -100,9 +113,16 @@ def _config_dir_for_middleware() -> Path | None:
         return None
 
 
+_NO_CACHE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+# Minimal blank HTML for 401 so the browser shows nothing behind the Basic Auth dialog (no cached page).
+_401_BLANK_BODY = b"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Authentication required</title></head><body></body></html>"
+
+
 @app.middleware("http")
 async def _optional_basic_auth(request: Request, call_next):
     """If .ui_auth exists in config dir (hashed password), require HTTP Basic Auth for all requests."""
+    from starlette.responses import Response
+
     config_dir = _config_dir_for_middleware()
     ui_creds = load_ui_auth(config_dir) if config_dir else None
     if not ui_creds:
@@ -113,19 +133,22 @@ async def _optional_basic_auth(request: Request, call_next):
             raw = base64.b64decode(auth[6:].strip()).decode("utf-8")
             user, _, password = raw.partition(":")
             if verify_ui_auth(config_dir, user, password):
-                return await call_next(request)
+                response = await call_next(request)
+                # Prevent caching so after closing the browser we don't show stale content behind the auth dialog
+                for k, v in _NO_CACHE_HEADERS.items():
+                    response.headers[k] = v
+                return response
         except Exception:
             pass
-    from starlette.responses import Response
     return Response(
         status_code=401,
-        headers={"WWW-Authenticate": "Basic realm=\"Fetch2Gmail\""},
-        content="Authentication required",
+        headers={
+            "WWW-Authenticate": "Basic realm=\"Fetch2Gmail\"",
+            **_NO_CACHE_HEADERS,
+            "Content-Type": "text/html; charset=utf-8",
+        },
+        content=_401_BLANK_BODY,
     )
-
-
-# In-memory state for OAuth (state param -> valid). Single process only.
-_oauth_states: dict[str, bool] = {}
 
 
 def _get_config_path() -> Path:
@@ -148,12 +171,43 @@ def _config_exists() -> bool:
     return _get_config_path().exists()
 
 
+def _token_exists() -> bool:
+    """True when config exists and the configured token file exists."""
+    cfg_dir = _config_dir_safe()
+    if not cfg_dir or not _config_exists():
+        return False
+    try:
+        cfg = load_config(_get_config_path(), resolve_password=False)
+        token_path = Path((cfg.get("gmail") or {}).get("token_path", "token.json"))
+        if not token_path.is_absolute():
+            token_path = cfg_dir / token_path
+        return token_path.exists()
+    except Exception:
+        return False
+
+
 def _require_auth(request: Request) -> bool:
-    """True if request is authenticated: UI password (Basic Auth already passed), or Google session, or no auth required."""
+    """True when allowed: either .ui_auth exists (Basic Auth already passed in middleware) or no .ui_auth (allow to set password or use app)."""
     cfg_dir = _config_dir_safe()
     if load_ui_auth(cfg_dir):
-        return True  # UI password mode: they passed Basic Auth in the middleware
-    return verify_request(request, cfg_dir, _config_exists())
+        return True  # Passed Basic Auth in middleware
+    return True  # No .ui_auth: allow (set password or use dashboard)
+
+
+def _token_available() -> bool:
+    """True when token.json exists so Gmail operations can run. Uses default path when no config yet."""
+    cfg_dir = _config_dir_safe()
+    if not cfg_dir:
+        return False
+    if _config_exists():
+        return _token_exists()
+    return (cfg_dir / "token.json").exists()
+
+
+def _can_set_ui_password() -> bool:
+    """True when no .ui_auth yet. Wizard is only shown when token exists (see show_set_password_wizard)."""
+    cfg_dir = _config_dir_safe()
+    return bool(cfg_dir and not load_ui_auth(cfg_dir))
 
 
 # Sanitized config for UI (no passwords, no token paths)
@@ -187,6 +241,8 @@ class ConfigResponse(BaseModel):
     gmail_connected: bool
     imap_password_set: bool
     config_exists: bool = True  # False when config.json not created yet (show setup wizard)
+    show_set_password_wizard: bool = False  # True when no .ui_auth → show wizard (must set password before using app)
+    ui_password_mode: bool = False  # True when .ui_auth exists → show "Change password" on dashboard
 
 
 @app.get("/static/app.js", response_model=None)
@@ -197,54 +253,77 @@ def static_app_js():
 
 @app.get("/api/setup/status")
 def api_setup_status() -> dict[str, bool]:
-    """Whether credentials.json and config exist (no auth). So UI can show 'Add credentials first'."""
+    """Whether credentials, token, and config exist (no auth). UI uses this to show the right step."""
     cfg_dir = _config_dir_safe()
     cred_exists = bool(cfg_dir and (cfg_dir / "credentials.json").exists())
-    return {"credentials_exist": cred_exists, "config_exists": _config_exists()}
+    return {
+        "credentials_exist": cred_exists,
+        "config_exists": _config_exists(),
+        "token_available": _token_available(),
+    }
+
+
+class SetUiPasswordBody(BaseModel):
+    """Body for creating .ui_auth from the UI (no .ui_auth yet)."""
+    username: str
+    password: str
+    password_confirm: str
+
+
+class ChangeUiPasswordBody(BaseModel):
+    """Body for changing .ui_auth (when already set)."""
+    current_password: str
+    new_username: str = ""  # empty = keep existing username
+    new_password: str
+    new_password_confirm: str
+
+
+@app.post("/api/setup/ui-password")
+def api_setup_ui_password(body: SetUiPasswordBody) -> dict[str, str]:
+    """Create .ui_auth when token exists and no .ui_auth yet (wizard shown)."""
+    if not _can_set_ui_password():
+        raise HTTPException(status_code=400, detail="UI password already set")
+    if not _token_available():
+        raise HTTPException(
+            status_code=400,
+            detail="Get token.json first (run fetch2gmail auth from the app folder), then set the UI password.",
+        )
+    username = (body.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username cannot be empty")
+    if not body.password:
+        raise HTTPException(status_code=400, detail="Password cannot be empty")
+    if body.password != body.password_confirm:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    cfg_dir = _config_dir()
+    create_ui_auth(cfg_dir, username, body.password)
+    return {"status": "ok", "message": "UI password set. Reload the page; you will be prompted for this username and password."}
+
+
+@app.put("/api/setup/ui-password")
+def api_change_ui_password(request: Request, body: ChangeUiPasswordBody) -> dict[str, str]:
+    """Change .ui_auth (when already set). Requires current password."""
+    cfg_dir = _config_dir_safe()
+    if not cfg_dir or not load_ui_auth(cfg_dir):
+        raise HTTPException(status_code=400, detail="UI password is not set")
+    if not _require_auth(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    stored = load_ui_auth(cfg_dir)
+    if not stored or not verify_ui_auth(cfg_dir, stored[0], body.current_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    username = (body.new_username or "").strip() or stored[0]
+    if not body.new_password:
+        raise HTTPException(status_code=400, detail="New password cannot be empty")
+    if body.new_password != body.new_password_confirm:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
+    create_ui_auth(Path(cfg_dir), username, body.new_password)
+    return {"status": "ok", "message": "Password updated. Use the new credentials on next login."}
 
 
 @app.get("/login", response_class=HTMLResponse, response_model=None)
-def login_page(request: Request) -> RedirectResponse:
-    """Redirect to Google sign-in only when UI password not used."""
-    cfg_dir = _config_dir_safe()
-    if load_ui_auth(cfg_dir):
-        return RedirectResponse(url="/", status_code=302)  # UI password mode: no Google needed
-    exists = _config_exists()
-    if not auth_required(cfg_dir, exists):
-        return RedirectResponse(url="/", status_code=302)
-    if verify_request(request, cfg_dir, exists):
-        return RedirectResponse(url="/", status_code=302)
-    return RedirectResponse(url="/auth/gmail", status_code=302)
-
-
-@app.get("/api/auth/required")
-def api_auth_required() -> dict[str, Any]:
-    """Whether UI must show Google sign-in. False when .ui_auth is used (Basic Auth is the gate)."""
-    cfg_dir = _config_dir_safe()
-    if load_ui_auth(cfg_dir):
-        return {"auth_required": False}
-    return {"auth_required": auth_required(cfg_dir, _config_exists())}
-
-
-@app.get("/api/auth/session")
-def api_auth_session(request: Request) -> dict[str, bool]:
-    """Whether the current request is logged in; ui_password_mode=True when .ui_auth is used (hide Log out)."""
-    cfg_dir = _config_dir_safe()
-    if load_ui_auth(cfg_dir):
-        return {"logged_in": True, "ui_password_mode": True}
-    return {"logged_in": verify_request(request, cfg_dir, _config_exists()), "ui_password_mode": False}
-
-
-@app.post("/api/logout")
-def api_logout():
-    """Clear session and redirect. Log out button is hidden when .ui_auth is used (Basic Auth cannot be cleared from the page)."""
-    cfg_dir = _config_dir_safe()
-    if load_ui_auth(cfg_dir):
-        resp = RedirectResponse(url="/", status_code=302)
-    else:
-        resp = RedirectResponse(url="/login", status_code=302)
-    clear_session_cookie(resp)
-    return resp
+def login_page() -> RedirectResponse:
+    """Redirect to index (no OAuth in UI)."""
+    return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/", response_class=HTMLResponse, response_model=None)
@@ -303,6 +382,35 @@ def _imap_password_set() -> bool:
         return False
 
 
+def _verify_imap_credentials(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    mailbox: str = "INBOX",
+    use_ssl: bool = True,
+) -> None:
+    """Verify IMAP login; raise ValueError with a user-friendly message on failure."""
+    if not (host and username and password):
+        raise ValueError("IMAP host, username, and password are required to verify.")
+    try:
+        get_uid_validity(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            mailbox=mailbox,
+            use_ssl=use_ssl,
+        )
+    except imaplib.IMAP4.error as e:
+        msg = str(e).strip()
+        if "AUTHENTICATIONFAILED" in msg.upper() or "LOGIN" in msg.upper() or "invalid" in msg.lower():
+            raise ValueError("IMAP login failed: incorrect password or invalid credentials.") from e
+        raise ValueError(f"IMAP connection failed: {msg}") from e
+    except OSError as e:
+        raise ValueError(f"IMAP connection failed: {e}") from e
+
+
 @app.get("/api/gmail/email")
 def api_gmail_email(request: Request) -> dict[str, str | None]:
     """Return the Gmail address currently connected (for UI warning when reconnecting)."""
@@ -334,6 +442,8 @@ def _default_config_response() -> ConfigResponse:
         gmail_connected=_gmail_connected(),
         imap_password_set=False,
         config_exists=False,
+        show_set_password_wizard=_can_set_ui_password() and _token_available(),
+        ui_password_mode=False,
     )
 
 
@@ -379,6 +489,8 @@ def api_config(request: Request) -> ConfigResponse:
         gmail_connected=_gmail_connected(),
         imap_password_set=_imap_password_set(),
         config_exists=True,
+        show_set_password_wizard=_can_set_ui_password() and _token_available(),
+        ui_password_mode=bool(load_ui_auth(_config_dir_safe())),
     )
 
 
@@ -418,6 +530,17 @@ def api_setup(request: Request, body: SetupBody) -> dict[str, str]:
     path = _get_config_path()
     if path.exists():
         raise HTTPException(status_code=400, detail="Config already exists")
+    try:
+        _verify_imap_credentials(
+            host=body.imap_host,
+            port=body.imap_port,
+            username=body.imap_username,
+            password=body.imap_password,
+            mailbox=body.imap_mailbox,
+            use_ssl=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = {
         "imap": {
@@ -450,7 +573,7 @@ def api_setup(request: Request, body: SetupBody) -> dict[str, str]:
 
 @app.put("/api/config")
 def api_config_update(request: Request, update: ConfigUpdate) -> dict[str, str]:
-    """Update config file. If imap_password provided, store in .env."""
+    """Update config file. If imap_password provided, verify IMAP login then store in .env."""
     if not _require_auth(request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     path = _get_config_path()
@@ -458,19 +581,36 @@ def api_config_update(request: Request, update: ConfigUpdate) -> dict[str, str]:
         raise HTTPException(status_code=404, detail="config.json not found")
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
-    if update.imap_host is not None:
-        cfg.setdefault("imap", {})["host"] = update.imap_host
-    if update.imap_port is not None:
-        cfg.setdefault("imap", {})["port"] = update.imap_port
-    if update.imap_username is not None:
-        cfg.setdefault("imap", {})["username"] = update.imap_username
-    if update.imap_mailbox is not None:
-        cfg.setdefault("imap", {})["mailbox"] = update.imap_mailbox
+    imap = cfg.setdefault("imap", {})
     if update.imap_password is not None:
-        cfg.setdefault("imap", {})["password_env"] = "IMAP_PASSWORD"
+        host = update.imap_host if update.imap_host is not None else imap.get("host", "")
+        port = int(update.imap_port if update.imap_port is not None else imap.get("port", 993))
+        username = update.imap_username if update.imap_username is not None else imap.get("username", "")
+        mailbox = update.imap_mailbox if update.imap_mailbox is not None else imap.get("mailbox", "INBOX")
+        use_ssl = imap.get("use_ssl", True)
+        try:
+            _verify_imap_credentials(
+                host=host,
+                port=port,
+                username=username,
+                password=update.imap_password,
+                mailbox=mailbox,
+                use_ssl=use_ssl,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        imap["password_env"] = "IMAP_PASSWORD"
         set_encrypted_env(_config_dir(), "IMAP_PASSWORD", update.imap_password)
         from dotenv import load_dotenv
         load_dotenv(_config_dir() / ".env")
+    if update.imap_host is not None:
+        imap["host"] = update.imap_host
+    if update.imap_port is not None:
+        imap["port"] = update.imap_port
+    if update.imap_username is not None:
+        imap["username"] = update.imap_username
+    if update.imap_mailbox is not None:
+        imap["mailbox"] = update.imap_mailbox
     if update.delete_after_import is not None:
         cfg.setdefault("imap", {})["delete_after_import"] = update.delete_after_import
     if update.gmail_use_label is not None:
@@ -484,75 +624,6 @@ def api_config_update(request: Request, update: ConfigUpdate) -> dict[str, str]:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     return {"status": "ok"}
-
-
-@app.get("/auth/gmail")
-def auth_gmail_start(request: Request):
-    """Redirect to Google OAuth. Works with or without config (uses config dir / cwd for credentials)."""
-    cfg_dir = _config_dir()
-    cred_path = cfg_dir / "credentials.json"
-    if not cred_path.exists():
-        return RedirectResponse(url="/?error=no_credentials", status_code=302)
-    path = _get_config_path()
-    if path.exists():
-        cfg = load_config(path, resolve_password=False)
-        gmail = cfg.get("gmail") or {}
-        cred_path = Path(gmail.get("credentials_path", "credentials.json"))
-        if not cred_path.is_absolute():
-            cred_path = cfg_dir / cred_path
-        if not cred_path.exists():
-            return RedirectResponse(url="/?error=no_credentials", status_code=302)
-    from .gmail_client import SCOPES
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    flow = InstalledAppFlow.from_client_secrets_file(str(cred_path), SCOPES)
-    base = str(request.base_url).rstrip("/")
-    redirect_uri = f"{base}/auth/gmail/callback"
-    flow.redirect_uri = redirect_uri
-    state = secrets.token_urlsafe(32)
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state)
-    _oauth_states[state] = flow.code_verifier
-    return RedirectResponse(url=auth_url, status_code=302)
-
-
-@app.get("/auth/gmail/callback")
-def auth_gmail_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
-    """Exchange code for tokens, save token.json, redirect to /. Works with or without config."""
-    if error:
-        return RedirectResponse(url=f"/?error=gmail_denied&detail={error}", status_code=302)
-    if not code or not state:
-        return RedirectResponse(url="/?error=invalid_callback", status_code=302)
-    code_verifier = _oauth_states.pop(state, None)
-    if not code_verifier:
-        return RedirectResponse(url="/?error=invalid_callback", status_code=302)
-    cfg_dir = _config_dir()
-    cred_path = cfg_dir / "credentials.json"
-    token_path = cfg_dir / "token.json"
-    path = _get_config_path()
-    if path.exists():
-        cfg = load_config(path, resolve_password=False)
-        gmail = cfg.get("gmail") or {}
-        cred_path = Path(gmail.get("credentials_path", "credentials.json"))
-        token_path = Path(gmail.get("token_path", "token.json"))
-        if not cred_path.is_absolute():
-            cred_path = cfg_dir / cred_path
-        if not token_path.is_absolute():
-            token_path = cfg_dir / token_path
-    from .gmail_client import SCOPES
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(cred_path), SCOPES, code_verifier=code_verifier
-    )
-    callback_base = str(request.base_url).rstrip("/")
-    if callback_base.endswith("/auth/gmail/callback"):
-        callback_base = callback_base[: -len("/auth/gmail/callback")].rstrip("/")
-    flow.redirect_uri = f"{callback_base}/auth/gmail/callback"
-    flow.fetch_token(code=code)
-    creds = flow.credentials
-    with open(token_path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
-    resp = RedirectResponse(url="/?gmail=connected", status_code=302)
-    set_session_cookie(resp, _config_dir_safe())
-    return resp
 
 
 @app.post("/api/fetch")
@@ -620,26 +691,40 @@ _HTML_PAGE = """
     .ok { color: #060; }
     #setupWizard { display: none; }
     #dashboard { display: none; }
-    .logout { float: right; font-size: 0.9rem; }
+    #setPasswordWizard { display: none; }
+    #tokenFirst { display: none; }
   </style>
 </head>
 <body>
-  <h1>Fetch2Gmail <span class="logout" id="logoutSpan" style="display:none"><form method="post" action="/api/logout" style="display:inline"><button type="submit">Log out</button></form></span></h1>
+  <h1>Fetch2Gmail</h1>
   <p id="subtitle">IMAP to Gmail import. Configure below.</p>
   <p id="loadingMsg">Loading...</p>
 
   <div id="credentialsFirst" style="display:none">
     <section>
       <h2>Add credentials to get started</h2>
-      <p>Place <strong>credentials.json</strong> in this app&apos;s folder (the same folder you ran <code>fetch2gmail serve</code> from).</p>
-      <p>Get it from <strong>Google Cloud Console</strong>: create a project, enable Gmail API, configure the OAuth consent screen, create a <strong>Web application</strong> OAuth client, add the redirect URI <code>http://127.0.0.1:8765/auth/gmail/callback</code>, then download the JSON and save it as <strong>credentials.json</strong>.</p>
-      <p>After you add the file, <a href="/">refresh this page</a> to continue.</p>
+      <p>Place <strong>credentials.json</strong> in this app&apos;s folder (the same folder you run <code>fetch2gmail serve</code> from). Get it from <strong>Google Cloud Console</strong>: create a project, enable Gmail API, configure the OAuth consent screen, create a <strong>Web application</strong> OAuth client, add the redirect URI <code>http://127.0.0.1:8765/auth/gmail/callback</code>, then download the JSON as <strong>credentials.json</strong>.</p>
+      <p>Then run <strong><code>fetch2gmail auth</code></strong> (CLI) to get <strong>token.json</strong>. After you add both files, <a href="/">refresh this page</a> to continue.</p>
     </section>
   </div>
 
-  <div id="landing" style="display:none">
+  <div id="tokenFirst" style="display:none">
     <section>
-      <p><a href="/auth/gmail" id="btnSignIn" style="display:inline-block; padding:0.5rem 1rem; background:#1a73e8; color:white; text-decoration:none; border-radius:4px; font-weight:500;">Sign in with Google</a></p>
+      <h2>Get token.json</h2>
+      <p>Run <strong><code>fetch2gmail auth</code></strong> from the app folder (the same folder you run <code>fetch2gmail serve</code> from). A browser will open; sign in with the Gmail account that will receive the imported mail and click Allow. <strong>token.json</strong> will be saved in that folder.</p>
+      <p>After you have token.json, <a href="/">refresh this page</a> to set the UI password and continue.</p>
+    </section>
+  </div>
+
+  <div id="setPasswordWizard" style="display:none">
+    <section>
+      <h2>Set UI password</h2>
+      <p>Set a username and password to protect this UI. You will use these to log in (HTTP Basic Auth).</p>
+      <label>Username <input id="set_pw_username" type="text" placeholder="admin" autocomplete="username"></label>
+      <label>Password <input id="set_pw_password" type="password" placeholder="Choose a password" autocomplete="new-password"></label>
+      <label>Confirm password <input id="set_pw_confirm" type="password" placeholder="Confirm" autocomplete="new-password"></label>
+      <button type="button" id="btnSetPassword">Set password</button>
+      <p id="setPasswordMsg" class="status"></p>
     </section>
   </div>
 
@@ -673,7 +758,21 @@ _HTML_PAGE = """
     <h2>Gmail</h2>
     <p id="gmailStatus"></p>
     <p id="gmailEmail" class="status" style="font-size:0.9rem"></p>
-    <button type="button" id="btnConnectGmail" style="display:none">Connect Gmail (OAuth)</button>
+    <p class="hint" style="font-size:0.85rem; color:#666;">Token is from <code>fetch2gmail auth</code> (CLI). To switch accounts, run <code>fetch2gmail auth</code> again and replace token.json.</p>
+  </section>
+
+  <section id="changePasswordSection" style="display:none">
+    <h2>Change UI password</h2>
+    <p>Update the username and password used to log in to this UI.</p>
+    <button type="button" id="btnShowChangePassword">Change password</button>
+    <div id="changePasswordForm" style="display:none; margin-top:1rem;">
+      <label>Current password <input id="change_pw_current" type="password" autocomplete="current-password"></label>
+      <label>New username <input id="change_pw_username" type="text" placeholder="Leave blank to keep current" autocomplete="username"></label>
+      <label>New password <input id="change_pw_new" type="password" autocomplete="new-password"></label>
+      <label>Confirm new password <input id="change_pw_confirm" type="password" autocomplete="new-password"></label>
+      <button type="button" id="btnChangePassword">Update password</button>
+      <p id="changePasswordMsg" class="status"></p>
+    </div>
   </section>
 
   <section>
@@ -706,8 +805,8 @@ _HTML_PAGE = """
 
 _APP_JS = r"""
 (function() {
-  const api = function(path) { return fetch(path).then(function(r) { if (r.status === 401) { location.href = '/login'; throw new Error('Unauthorized'); } return r.ok ? r.json() : r.json().then(function(j) { return Promise.reject(j); }); }); };
-  const put = function(path, body) { return fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function(r) { if (r.status === 401) { location.href = '/login'; throw new Error('Unauthorized'); } return r.json(); }); };
+  const api = function(path) { return fetch(path).then(function(r) { if (r.status === 401) { location.href = '/'; throw new Error('Unauthorized'); } return r.ok ? r.json() : r.json().then(function(j) { return Promise.reject(j); }); }); };
+  const put = function(path, body) { return fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function(r) { if (r.status === 401) { location.href = '/'; throw new Error('Unauthorized'); } return r.ok ? r.json() : r.json().then(function(j) { return Promise.reject(j); }); }); };
 
   fetch('/api/setup/status').then(function(r) { return r.json(); }).then(function(st) {
     if (!st.credentials_exist) {
@@ -715,37 +814,35 @@ _APP_JS = r"""
       document.getElementById('credentialsFirst').style.display = 'block';
       return;
     }
-    fetch('/api/auth/session').then(function(r) { return r.json(); }).then(function(session) {
-      if (!session.logged_in) {
-        document.getElementById('loadingMsg').style.display = 'none';
-        document.getElementById('subtitle').textContent = 'Import mail from your ISP mailbox into Gmail. Sign in with Google to connect your account and get started.';
-        document.getElementById('landing').style.display = 'block';
-        return;
-      }
-      if (!session.ui_password_mode) document.getElementById('logoutSpan').style.display = 'inline';
-      loadConfig().then(function(c) { if (c) { loadStatus(); loadLogs(); } });
-    }).catch(function() {
+    if (!st.token_available) {
       document.getElementById('loadingMsg').style.display = 'none';
-      document.getElementById('subtitle').textContent = 'Import mail from your ISP mailbox into Gmail. Sign in with Google to connect your account and get started.';
-      document.getElementById('landing').style.display = 'block';
-    });
+      document.getElementById('tokenFirst').style.display = 'block';
+      return;
+    }
+    loadConfig().then(function(c) { if (c) { loadStatus(); loadLogs(); wireSetPasswordWizard(c.show_set_password_wizard); wireChangePassword(c.ui_password_mode); } });
   }).catch(function() { document.getElementById('loadingMsg').style.display = 'none'; });
   var params = new URLSearchParams(location.search);
-  if (params.get('gmail') === 'connected') {
-    document.getElementById('subtitle').textContent = 'Gmail connected. You can run a fetch now.';
-    history.replaceState({}, '', '/');
-  }
-  if (params.get('error') === 'no_credentials') document.getElementById('subtitle').innerHTML = '<span class="error">Put credentials.json in the app folder and try Connect Gmail again.</span>';
+  if (params.get('error') === 'no_credentials') document.getElementById('subtitle').innerHTML = '<span class="error">Put credentials.json in the app folder and run fetch2gmail auth for token.json.</span>';
 
   function hideLoading() { var el = document.getElementById('loadingMsg'); if (el) el.style.display = 'none'; }
   function loadConfig() {
     return api('/api/config').then(function(c) {
       hideLoading();
+      if (c.show_set_password_wizard) {
+        document.getElementById('dashboard').style.display = 'none';
+        document.getElementById('setupWizard').style.display = 'none';
+        document.getElementById('setPasswordWizard').style.display = 'block';
+        wireSetPasswordWizard(true);
+        wireChangePassword(false);
+        return c;
+      }
       if (!c.config_exists) {
         document.getElementById('dashboard').style.display = 'none';
+        document.getElementById('setPasswordWizard').style.display = 'none';
         document.getElementById('setupWizard').style.display = 'block';
         return null;
       }
+      document.getElementById('setPasswordWizard').style.display = 'none';
       document.getElementById('setupWizard').style.display = 'none';
       document.getElementById('dashboard').style.display = 'block';
       document.getElementById('imap_host').value = c.imap.host;
@@ -758,9 +855,7 @@ _APP_JS = r"""
       document.getElementById('gmail_label').value = c.gmail.label;
       document.getElementById('poll_interval').value = c.poll_interval_minutes;
       document.getElementById('state_db').value = c.state_db_path;
-      document.getElementById('gmailStatus').innerHTML = c.gmail_connected ? '<span class="ok">Gmail connected</span>' : '<span class="error">Not connected</span>';
-      document.getElementById('btnConnectGmail').style.display = 'inline-block';
-      document.getElementById('btnConnectGmail').textContent = c.gmail_connected ? 'Reconnect Gmail (switch account)' : 'Connect Gmail (OAuth)';
+      document.getElementById('gmailStatus').innerHTML = c.gmail_connected ? '<span class="ok">Gmail connected</span>' : '<span class="error">Not connected (add token.json from fetch2gmail auth)</span>';
       document.getElementById('gmailEmail').textContent = '';
       if (c.gmail_connected) {
         api('/api/gmail/email').then(function(d) { if (d.email) document.getElementById('gmailEmail').textContent = 'Connected as ' + d.email; }).catch(function() {});
@@ -790,6 +885,68 @@ _APP_JS = r"""
       document.getElementById('logs').textContent = l.lines.length ? l.lines.join('\n') : '(no logs)';
     }).catch(function() {});
   }
+  function wireSetPasswordWizard(show) {
+    if (!show) return;
+    var msg = document.getElementById('setPasswordMsg');
+    document.getElementById('btnSetPassword').onclick = function() {
+      var username = document.getElementById('set_pw_username').value.trim();
+      var password = document.getElementById('set_pw_password').value;
+      var confirm = document.getElementById('set_pw_confirm').value;
+      if (!username) { msg.textContent = 'Username cannot be empty.'; msg.className = 'error'; return; }
+      if (!password) { msg.textContent = 'Password cannot be empty.'; msg.className = 'error'; return; }
+      if (password !== confirm) { msg.textContent = 'Passwords do not match.'; msg.className = 'error'; return; }
+      fetch('/api/setup/ui-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password, password_confirm: confirm })
+      }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); }).then(function(x) {
+        if (x.ok) {
+          msg.textContent = x.body.message || 'Password set. Reload the page.';
+          msg.className = 'ok';
+          setTimeout(function() { location.reload(); }, 2500);
+        } else {
+          msg.textContent = x.body.detail || 'Error setting password.';
+          msg.className = 'error';
+        }
+      }).catch(function(e) {
+        msg.textContent = 'Error: ' + (e.message || 'request failed');
+        msg.className = 'error';
+      });
+    };
+  }
+  function wireChangePassword(show) {
+    if (!show) return;
+    var section = document.getElementById('changePasswordSection');
+    var form = document.getElementById('changePasswordForm');
+    if (!section || !form) return;
+    section.style.display = 'block';
+    document.getElementById('btnShowChangePassword').onclick = function() { form.style.display = form.style.display === 'none' ? 'block' : 'none'; };
+    document.getElementById('btnChangePassword').onclick = function() {
+      var msg = document.getElementById('changePasswordMsg');
+      var current = document.getElementById('change_pw_current').value;
+      var newUser = document.getElementById('change_pw_username').value.trim();
+      var newPw = document.getElementById('change_pw_new').value;
+      var confirm = document.getElementById('change_pw_confirm').value;
+      if (!current) { msg.textContent = 'Current password is required.'; msg.className = 'error'; return; }
+      if (!newPw) { msg.textContent = 'New password cannot be empty.'; msg.className = 'error'; return; }
+      if (newPw !== confirm) { msg.textContent = 'New passwords do not match.'; msg.className = 'error'; return; }
+      fetch('/api/setup/ui-password', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password: current, new_username: newUser, new_password: newPw, new_password_confirm: confirm }) }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); }).then(function(x) {
+        if (x.ok) {
+          msg.textContent = x.body.message || 'Password updated.';
+          msg.className = 'ok';
+          document.getElementById('change_pw_current').value = '';
+          document.getElementById('change_pw_new').value = '';
+          document.getElementById('change_pw_confirm').value = '';
+        } else {
+          msg.textContent = x.body.detail || 'Error';
+          msg.className = 'error';
+        }
+      }).catch(function(e) {
+        msg.textContent = e.message || 'Error';
+        msg.className = 'error';
+      });
+    };
+  }
   document.getElementById('btnFetch').onclick = function() {
     fetch('/api/fetch', { method: 'POST' }).then(function(r) {
       if (r.status === 401) { location.href = '/login'; return; }
@@ -816,15 +973,6 @@ _APP_JS = r"""
       loadLogs();
     });
   };
-  document.getElementById('btnConnectGmail').onclick = function() {
-    var btn = document.getElementById('btnConnectGmail');
-    if (btn.textContent.indexOf('Reconnect') === 0) {
-      var emailEl = document.getElementById('gmailEmail');
-      var msg = emailEl.textContent ? 'Reconnecting will replace the current Gmail account (' + emailEl.textContent.replace('Connected as ', '') + ') with the one you sign in with. Continue?' : 'Reconnecting will replace the current Gmail account. Continue?';
-      if (!confirm(msg)) return;
-    }
-    window.location.href = '/auth/gmail';
-  };
   document.getElementById('gmail_use_label').onchange = function() {
     document.getElementById('gmail_label_row').style.display = this.checked ? 'block' : 'none';
   };
@@ -846,6 +994,9 @@ _APP_JS = r"""
       document.getElementById('status').textContent = 'Config saved.';
       document.getElementById('status').className = 'status';
       if (pw) document.getElementById('imap_password').value = '';
+    }).catch(function(e) {
+      document.getElementById('status').textContent = 'Error: ' + (typeof e.detail === 'string' ? e.detail : (e.detail && e.detail.detail) || e.message || 'Save failed');
+      document.getElementById('status').className = 'error';
     });
   };
   document.getElementById('btnRefreshLogs').onclick = loadLogs;
