@@ -77,7 +77,7 @@ pipx ensurepath
 pipx install fetch2gmail
 ```
 
-The command is at **`~/.local/bin/fetch2gmail`**; use that path in systemd (step 9). The app will find your token and files in `/opt/fetch2gmail` because in step 9 you set **WorkingDirectory** and **FETCH2GMAIL_CONFIG** in the systemd units so that when the service runs, its working directory is `/opt/fetch2gmail`. For step 8 you will **cd** into `/opt/fetch2gmail` before running `set-ui-password` so that the password file is stored there.
+The app will find your token and files in `/opt/fetch2gmail` because in step 9 you install a single systemd service that sets **WorkingDirectory** and **FETCH2GMAIL_CONFIG** to that directory. For step 8 you **cd** into `/opt/fetch2gmail` before running `set-ui-password` so the password file is stored there.
 
 **Step 8. Set the UI username and password**
 
@@ -90,52 +90,34 @@ fetch2gmail set-ui-password
 
 Enter a username and password when prompted.
 
-**Step 9. Install and enable the systemd services**
+**Step 9. Install and enable the systemd service (one service: web UI + background fetch)**
 
-Copy the three unit files into systemd (get them from the repo, e.g. clone or download):
-
-```bash
-sudo cp /path/to/fetch2gmail/systemd/fetch2gmail.service /path/to/fetch2gmail/systemd/fetch2gmail.timer /path/to/fetch2gmail/systemd/fetch2gmail-ui.service /etc/systemd/system/
-```
-
-Edit the **fetch** service:
+One service runs the web UI and polls your ISP mailbox on a schedule (every 5 minutes by default). Generate the unit file and install it:
 
 ```bash
-sudo systemctl edit --full fetch2gmail.service
-```
-
-Set:
-
-- **User=** and **Group=** — the user that owns the data directory (e.g. `odroid`).
-- **WorkingDirectory=** — your data directory (e.g. `/opt/fetch2gmail`).
-- **Environment=FETCH2GMAIL_CONFIG=** — full path to config (e.g. `/opt/fetch2gmail/config.json`).
-- **ExecStart=** — path to `fetch2gmail run` (e.g. `/home/odroid/.local/bin/fetch2gmail run`).
-
-Save and exit.
-
-Edit the **UI** service:
-
-```bash
-sudo systemctl edit --full fetch2gmail-ui.service
-```
-
-Set the same **User**, **Group**, **WorkingDirectory**, **FETCH2GMAIL_CONFIG**. Set **ExecStart=** to the same path but with **`serve --host 0.0.0.0`** (e.g. `/home/odroid/.local/bin/fetch2gmail serve --host 0.0.0.0`). Save and exit.
-
-Enable and start both the UI service and the timer:
-
-```bash
+fetch2gmail install-service --user YOUR_USER --dir /opt/fetch2gmail -o /tmp/fetch2gmail.service
+sudo mv /tmp/fetch2gmail.service /etc/systemd/system/fetch2gmail.service
 sudo systemctl daemon-reload
-sudo systemctl enable fetch2gmail-ui.service
-sudo systemctl start fetch2gmail-ui.service
-sudo systemctl enable fetch2gmail.timer
-sudo systemctl start fetch2gmail.timer
+sudo systemctl enable fetch2gmail
+sudo systemctl start fetch2gmail
+```
+
+Replace **YOUR_USER** with the user that owns `/opt/fetch2gmail` (e.g. `odroid`). Replace **/opt/fetch2gmail** if you used a different data directory. The command finds `fetch2gmail` on your PATH; if it is elsewhere, add `--exec /path/to/fetch2gmail`.
+
+Alternatively, print the unit file and pipe it into place:
+
+```bash
+fetch2gmail install-service --user YOUR_USER --dir /opt/fetch2gmail | sudo tee /etc/systemd/system/fetch2gmail.service > /dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable fetch2gmail
+sudo systemctl start fetch2gmail
 ```
 
 **Step 10. Configure ISP mail in the web UI**
 
 Open **http://\<server-ip\>:8765** in your browser (e.g. http://192.168.1.10:8765). Log in with the UI username and password from step 8. You will see the **initial setup** form. Enter your IMAP host, username, password, mailbox, and Gmail label, then click **Create config**. The app stores your password securely and will poll your ISP mailbox on a schedule (every 5 minutes by default). You do not need to edit any config file by hand.
 
-**Done.** To watch logs: `journalctl -u fetch2gmail.service -f` or `journalctl -u fetch2gmail-ui.service -f`. See **systemd/README.md** for more.
+**Done.** To watch logs: `journalctl -u fetch2gmail -f`.
 
 ---
 
@@ -168,23 +150,15 @@ mkdir -p ~/fetch2gmail
 
 Use the same path in the steps below (replace `~/fetch2gmail` if you use something else).
 
-**Step 5. Install and enable the systemd services**
+**Step 5. Install and enable the systemd service**
 
-Copy the three unit files from the repo to `/etc/systemd/system/` (same as Use case 1, step 9). Edit **fetch2gmail.service** and **fetch2gmail-ui.service** with:
-
-- **User** and **Group** — your user.
-- **WorkingDirectory** — your data directory (e.g. `/home/you/fetch2gmail`).
-- **Environment=FETCH2GMAIL_CONFIG=** — e.g. `/home/you/fetch2gmail/config.json`.
-- **ExecStart** — e.g. `/home/you/.local/bin/fetch2gmail run` and `/home/you/.local/bin/fetch2gmail serve --host 0.0.0.0`.
-
-Then:
+Same as Use case 1, step 9: one service (web UI + background fetch). Replace **YOUR_USER** and the path with yours:
 
 ```bash
+fetch2gmail install-service --user YOUR_USER --dir /home/YOUR_USER/fetch2gmail | sudo tee /etc/systemd/system/fetch2gmail.service > /dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable fetch2gmail-ui.service
-sudo systemctl start fetch2gmail-ui.service
-sudo systemctl enable fetch2gmail.timer
-sudo systemctl start fetch2gmail.timer
+sudo systemctl enable fetch2gmail
+sudo systemctl start fetch2gmail
 ```
 
 **Step 6. Sign in with Google in the web UI**
@@ -212,7 +186,7 @@ Google does not allow redirect URIs that use an IP address. That is why the toke
 
 ### Poll interval
 
-The timer runs the fetch every 5 minutes by default. You can change the interval in the web UI (Config) or in **config.json** (`poll_interval_minutes`).
+The app runs the fetch every 5 minutes by default (background poller in the same process as the web UI). You can change the interval in the web UI (Config) or in **config.json** (`poll_interval_minutes`).
 
 ### Data directory
 
@@ -230,6 +204,7 @@ All app files live in **one directory**: **config.json**, **credentials.json**, 
 |--------|---------|
 | `fetch2gmail auth` | Get **token.json** on a machine with a browser (opens http://127.0.0.1:8765). |
 | `fetch2gmail set-ui-password` | Set UI username and password (hash in **.ui_auth**). |
+| `fetch2gmail install-service` | Generate systemd unit file (one service: web UI + background fetch). Use `--user`, `--dir`, and optionally `--output` or pipe to `sudo tee`. |
 | `fetch2gmail serve` | Run the web UI (default: localhost only; use `--host 0.0.0.0` to bind to all interfaces). |
 | `fetch2gmail run` | Run one fetch cycle. |
 | `fetch2gmail run --dry-run` | Connect to ISP and show what would be imported; no Gmail import, no delete. |
@@ -237,6 +212,41 @@ All app files live in **one directory**: **config.json**, **credentials.json**, 
 ### Uninstall (computer used only for token)
 
 After copying **credentials.json** and **token.json** to the server, you can remove fetch2gmail from that computer: `pipx uninstall fetch2gmail`. Reinstall with `pipx install fetch2gmail` if you need to run `fetch2gmail auth` again later.
+
+---
+
+## Development / testing from source
+
+To run from a git clone (e.g. to test changes before pushing):
+
+1. **Clone and go into the repo:**
+   ```bash
+   git clone https://github.com/yourusername/fetch2gmail.git
+   cd fetch2gmail
+   ```
+
+2. **Create and activate a virtual environment:**
+   - **Linux / macOS:** `python3 -m venv .venv` then `source .venv/bin/activate`
+   - **Windows (PowerShell):** `python -m venv .venv` then `.venv\Scripts\Activate.ps1`
+   - **Windows (Command Prompt):** `python -m venv .venv` then `.venv\Scripts\activate.bat`
+
+3. **Install the package in editable mode** (so changes in the repo are used when you run the app):
+   ```bash
+   pip install -e .
+   ```
+   Optional, for tests: `pip install -e ".[dev]"`
+
+4. **Run and test** (use the same terminal with the venv active):
+   - `fetch2gmail serve` — web UI at http://127.0.0.1:8765
+   - `fetch2gmail auth` — get token (put **credentials.json** in the current directory first)
+   - `fetch2gmail run` or `fetch2gmail run --dry-run` — if you have **config.json** and secrets set up
+
+5. **Before pushing: test the build** so the package still builds and you catch errors:
+   ```bash
+   pip install build
+   python -m build
+   ```
+   This creates `dist/` with the sdist and wheel. See **docs/PUBLISHING.md** for Test PyPI and release steps.
 
 ---
 

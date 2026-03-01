@@ -1,27 +1,22 @@
 [Unit]
-Description=Fetch2Gmail - one-shot IMAP to Gmail fetch
+Description=Fetch2Gmail - web UI and background fetch
 Documentation=https://github.com/yourusername/fetch2gmail
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-# Run as the user who owns the config and token (edit for your system)
+Type=simple
 User=YOUR_USER
 Group=YOUR_USER
-# Config path (edit or use override)
 Environment=FETCH2GMAIL_CONFIG=/home/YOUR_USER/fetch2gmail/config.json
-# Optional: IMAP password from environment (or use password_env in config)
-# Environment=IMAP_PASSWORD=secret
 WorkingDirectory=/home/YOUR_USER/fetch2gmail
-# Log to journal (stdout/stderr)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=fetch2gmail
-# pipx (recommended): ExecStart=/home/YOUR_USER/.local/bin/fetch2gmail run
-# Venv in data dir: ExecStart=/home/YOUR_USER/fetch2gmail/.venv/bin/fetch2gmail run
-ExecStart=/home/YOUR_USER/.local/bin/fetch2gmail run
-# Restart not used for oneshot
+# Replace with your path to fetch2gmail (e.g. ~/.local/bin/fetch2gmail for pipx)
+ExecStart=/home/YOUR_USER/.local/bin/fetch2gmail serve --host 0.0.0.0
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

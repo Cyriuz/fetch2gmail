@@ -2,12 +2,17 @@
 
 ## Test the build locally (before pushing)
 
-Run this from the repo root so you catch build errors and deprecation warnings before pushing:
+Use a **virtual environment** so you don’t touch system Python. From the repo root:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -e .            # optional: run the app from source while developing
 pip install build
 python -m build
 ```
+
+If you only want to test the build (no need to run the app), you can skip `pip install -e .`. See the README section **Development / testing from source** for full venv setup and running the app from a clone.
 
 - This creates `dist/fetch2gmail-<version>.tar.gz` and `dist/*.whl`. If it fails or shows setuptools deprecation warnings, fix `pyproject.toml` and try again.
 - Optional: upload to **Test PyPI** first (does not affect the real PyPI):

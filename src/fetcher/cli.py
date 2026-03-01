@@ -5,6 +5,7 @@ Interactive CLI for Fetch2Gmail: config wizard and one-shot / dry-run.
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -68,6 +69,20 @@ def main() -> None:
         help="Set a username and password for the web UI (stored as a hash in .ui_auth; use when exposing UI with --host 0.0.0.0)",
     )
     p_set_ui_password.set_defaults(func=_cmd_set_ui_password)
+
+    p_install_service = sub.add_parser(
+        "install-service",
+        help="Generate a systemd unit file for Fetch2Gmail (one service: web UI + background fetch). Write to --output or stdout.",
+    )
+    p_install_service.add_argument("--user", required=True, help="User and group to run the service (e.g. odroid)")
+    p_install_service.add_argument("--dir", required=True, help="Data directory (config, credentials, token; e.g. /opt/fetch2gmail)")
+    p_install_service.add_argument("--output", "-o", default=None, help="Write unit file here (default: print to stdout)")
+    p_install_service.add_argument(
+        "--exec",
+        default=None,
+        help="Path to fetch2gmail binary (default: detect from PATH)",
+    )
+    p_install_service.set_defaults(func=_cmd_install_service)
 
     args = parser.parse_args()
     if not args.command:
@@ -136,6 +151,57 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     serve(host=args.host, port=args.port, config_path=args.config)
 
 
+# Single systemd service: web UI + built-in poller (no separate timer/oneshot)
+_SYSTEMD_UNIT_TEMPLATE = """[Unit]
+Description=Fetch2Gmail - web UI and background fetch
+Documentation=https://github.com/yourusername/fetch2gmail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={user}
+Group={group}
+Environment=FETCH2GMAIL_CONFIG={config_path}
+WorkingDirectory={working_dir}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fetch2gmail
+ExecStart={exec_start}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _cmd_install_service(args: argparse.Namespace) -> None:
+    """Generate systemd unit file and write to --output or stdout."""
+    user = args.user
+    data_dir = Path(args.dir).resolve()
+    config_path = data_dir / "config.json"
+    exec_path = args.exec or shutil.which("fetch2gmail")
+    if not exec_path:
+        print("Could not find fetch2gmail on PATH. Use --exec /path/to/fetch2gmail", file=sys.stderr)
+        sys.exit(1)
+    exec_path = str(Path(exec_path).resolve())
+    content = _SYSTEMD_UNIT_TEMPLATE.format(
+        user=user,
+        group=user,
+        config_path=config_path,
+        working_dir=data_dir,
+        exec_start=f"{exec_path} serve --host 0.0.0.0",
+    )
+    if args.output:
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(content, encoding="utf-8")
+        print(f"Wrote {out}. Then: sudo systemctl daemon-reload && sudo systemctl enable fetch2gmail && sudo systemctl start fetch2gmail", file=sys.stderr)
+    else:
+        print(content)
+
+
 def _cmd_set_ui_password(args: argparse.Namespace) -> None:
     """Prompt for username and password; store bcrypt hash in .ui_auth in config directory."""
     import getpass
@@ -154,7 +220,7 @@ def _cmd_set_ui_password(args: argparse.Namespace) -> None:
         print("Password cannot be empty.", file=sys.stderr)
         sys.exit(1)
     create_ui_auth(config_dir, username, password)
-    print("Done. The web UI will now require this username and password when you run it (e.g. with --host 0.0.0.0).")
+    print("Done. The web UI will now require this username and password when you run it")
 
 
 def _cmd_auth(args: argparse.Namespace) -> None:
