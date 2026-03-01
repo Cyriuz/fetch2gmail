@@ -68,6 +68,8 @@ Use the same path in the steps below (replace `/opt/fetch2gmail` and the usernam
 
 **Step 7. Install pipx and fetch2gmail on the server**
 
+Run these from **any directory** (you do not need to be in `/opt/fetch2gmail`):
+
 ```bash
 sudo apt install pipx
 pipx ensurepath
@@ -75,7 +77,7 @@ pipx ensurepath
 pipx install fetch2gmail
 ```
 
-The command is at **`~/.local/bin/fetch2gmail`**. Use that path in systemd (step 9).
+The command is at **`~/.local/bin/fetch2gmail`**; use that path in systemd (step 9). The app will find your token and files in `/opt/fetch2gmail` because in step 9 you set **WorkingDirectory** and **FETCH2GMAIL_CONFIG** in the systemd units so that when the service runs, its working directory is `/opt/fetch2gmail`. For step 8 you will **cd** into `/opt/fetch2gmail` before running `set-ui-password` so that the password file is stored there.
 
 **Step 8. Set the UI username and password**
 
