@@ -1,0 +1,23 @@
+{
+  "imap": {
+    "host": "imap.example.com",
+    "port": 993,
+    "username": "your-isp-email@example.com",
+    "password_env": "IMAP_PASSWORD",
+    "mailbox": "INBOX",
+    "use_ssl": true
+  },
+  "gmail": {
+    "label": "ISP Mail",
+    "credentials_path": "credentials.json",
+    "token_path": "token.json"
+  },
+  "state": {
+    "db_path": "state.db"
+  },
+  "ui": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "poll_interval_minutes": 5
+}

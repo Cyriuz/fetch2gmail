@@ -1,0 +1,27 @@
+[Unit]
+Description=Fetch2Gmail - one-shot IMAP to Gmail fetch
+Documentation=https://github.com/yourusername/fetch2gmail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Run as the user who owns the config and token (edit for your system)
+User=YOUR_USER
+Group=YOUR_USER
+# Config path (edit or use override)
+Environment=FETCH2GMAIL_CONFIG=/home/YOUR_USER/fetch2gmail/config.json
+# Optional: IMAP password from environment (or use password_env in config)
+# Environment=IMAP_PASSWORD=secret
+WorkingDirectory=/home/YOUR_USER/fetch2gmail
+# Log to journal (stdout/stderr)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fetch2gmail
+# If installed via pip: ExecStart=/usr/local/bin/fetch2gmail run
+# From source (WorkingDirectory = repo root): ExecStart=/usr/bin/python3 -m fetcher.cli run
+ExecStart=/usr/local/bin/fetch2gmail run
+# Restart not used for oneshot
+
+[Install]
+WantedBy=multi-user.target
