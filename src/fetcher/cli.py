@@ -219,6 +219,10 @@ def _cmd_set_ui_password(args: argparse.Namespace) -> None:
     if not password:
         print("Password cannot be empty.", file=sys.stderr)
         sys.exit(1)
+    password_confirm = getpass.getpass("Confirm password: ")
+    if password != password_confirm:
+        print("Passwords do not match.", file=sys.stderr)
+        sys.exit(1)
     create_ui_auth(config_dir, username, password)
     print("Done. The web UI will now require this username and password when you run it")
 
