@@ -198,6 +198,33 @@ All app files live in **one directory**: **config.json**, **credentials.json**, 
 - On the server, the UI is protected by the username and password you set with **`fetch2gmail set-ui-password`** (stored as a hash in **.ui_auth**). There is no Google sign-in on the server when **token.json** is already there.
 - The Gmail scope requested is **gmail.modify** (read and modify labels/messages only).
 
+### Multiple accounts (multiple instances)
+
+One instance = one IMAP mailbox → one Gmail account. To run **multiple accounts** (e.g. two ISP mailboxes forwarding to two Gmail addresses), run **multiple instances**, each with its own data directory and **its own port** so the UIs don’t conflict.
+
+**Second instance (example):**
+
+1. Create a second data directory and put config and credentials there (e.g. `/opt/fetch2gmail2` with its own **config.json**, **credentials.json**, **token.json**, **.env**). Use the same GCP **credentials.json** if you like; get a separate **token.json** for the second Gmail account (run `fetch2gmail auth` and sign in with the second Gmail, then copy that **token.json** into the second directory).
+
+2. Generate a second systemd unit with a **different port** and unit name:
+   ```bash
+   fetch2gmail install-service --user YOUR_USER --dir /opt/fetch2gmail2 -o /tmp/fetch2gmail2.service
+   ```
+   Edit `/tmp/fetch2gmail2.service`: in **ExecStart**, add **`--port 8766`** so this instance uses port 8766 (the first stays on 8765). Set **WorkingDirectory** and **Environment=FETCH2GMAIL_CONFIG** to the second directory (e.g. `/opt/fetch2gmail2`, `/opt/fetch2gmail2/config.json`).
+
+3. Install and enable the second unit under a different name so both can run:
+   ```bash
+   sudo mv /tmp/fetch2gmail2.service /etc/systemd/system/fetch2gmail2.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable fetch2gmail2
+   sudo systemctl start fetch2gmail2
+   ```
+   Run **`fetch2gmail set-ui-password`** once from the second directory (or with **FETCH2GMAIL_CONFIG** set to the second config) so the second UI is protected.
+
+4. Open the first UI at **http://server:8765** and the second at **http://server:8766**. Each has its own config, token, and poller.
+
+**You need a different port per instance** — each `fetch2gmail serve` binds to one port, so a second instance must use `--port 8766` (or another free port).
+
 ### Troubleshooting
 
 To see what the service is doing (background poller, fetch results, errors), stream the logs:
@@ -206,7 +233,7 @@ To see what the service is doing (background poller, fetch results, errors), str
 journalctl -u fetch2gmail -f
 ```
 
-You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch now", and "Background fetch: imported=...". Use **Ctrl+C** to stop following.
+You’ll see messages like "Poller: next fetch in Xs", "Poller: running fetch now", and "Background fetch: imported=...". Use **Ctrl+C** to stop following. For a second instance (e.g. **fetch2gmail2**), use `journalctl -u fetch2gmail2 -f`.
 
 ### CLI
 
