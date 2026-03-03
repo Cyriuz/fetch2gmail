@@ -202,3 +202,5 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
         stream=sys.stdout,
     )
+    # Suppress noisy googleapiclient message about file_cache and oauth2client
+    logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.WARNING)
