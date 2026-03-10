@@ -94,23 +94,24 @@ def import_message(
     label_ids: list[str],
     inbox_label_id: str | None = None,
     unread_label_id: str | None = None,
+    mark_unread: bool = True,
 ) -> str:
     """
     Import a single message using users.messages.import.
     Preserves original headers and sets internalDate when possible.
+    If mark_unread is False (message was read on ISP), the message is imported as read.
     Returns Gmail message ID.
     """
     body = {"raw": base64.urlsafe_b64encode(raw).decode("ascii")}
     internal_date = _parse_date_from_raw(raw)
     if internal_date:
         body["internalDate"] = internal_date
-    # Gmail API: imported messages do not appear in INBOX unless we pass labelIds. Include INBOX and UNREAD.
     inbox_id = inbox_label_id or get_inbox_label_id(service, user_id)
     unread_id = unread_label_id or get_unread_label_id(service, user_id)
     body["labelIds"] = list(label_ids) if label_ids else []
     if inbox_id not in body["labelIds"]:
         body["labelIds"].append(inbox_id)
-    if unread_id not in body["labelIds"]:
+    if mark_unread and unread_id not in body["labelIds"]:
         body["labelIds"].append(unread_id)
 
     msg = _execute_with_backoff(
@@ -120,6 +121,39 @@ def import_message(
         ).execute()
     )
     return msg["id"]
+
+
+def _parse_message_id_from_raw(raw: bytes) -> str | None:
+    """Extract Message-ID header from raw message. Returns None if missing."""
+    try:
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+        mid = msg.get("Message-ID")
+        return mid.strip() if mid else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def gmail_has_message_with_id(
+    service: Any, user_id: str, rfc822_message_id: str
+) -> bool:
+    """
+    Return True if Gmail already has a message with the given RFC822 Message-ID
+    (checks the account, so we can skip re-importing). Used for copy-all deduplication.
+    """
+    if not rfc822_message_id or not rfc822_message_id.strip():
+        return False
+    # Gmail search: rfc822msgid:<value>. Value may contain angle brackets; keep as-is.
+    q = f"rfc822msgid:{rfc822_message_id.strip()}"
+    try:
+        resp = _execute_with_backoff(
+            lambda: service.users()
+            .messages()
+            .list(userId=user_id, q=q, maxResults=1)
+            .execute()
+        )
+        return bool(resp.get("messages"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _execute_with_backoff(request_fn, max_retries: int = 5):

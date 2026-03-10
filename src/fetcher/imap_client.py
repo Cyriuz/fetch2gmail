@@ -36,6 +36,18 @@ def _extract_rfc822(parts: list | None) -> bytes:
     return b""
 
 
+def _extract_flags_seen(parts: list | None) -> bool:
+    """Extract FLAGS from IMAP FETCH response; return True if \\Seen is set."""
+    if not parts:
+        return False
+    first = parts[0]
+    if isinstance(first, tuple):
+        first = first[0] if first else b""
+    if isinstance(first, bytes):
+        return b"\\Seen" in first
+    return "\\Seen" in str(first)
+
+
 @dataclass
 class FetchedMessage:
     """A message fetched by UID with its raw bytes and hash for deduplication."""
@@ -44,11 +56,24 @@ class FetchedMessage:
     uid_validity: int
     raw: bytes
     message_hash: str
+    is_seen: bool = False
 
     @classmethod
-    def from_raw(cls, uid: int, uid_validity: int, raw: bytes) -> "FetchedMessage":
+    def from_raw(
+        cls,
+        uid: int,
+        uid_validity: int,
+        raw: bytes,
+        is_seen: bool = False,
+    ) -> "FetchedMessage":
         h = hashlib.sha256(raw).hexdigest()
-        return cls(uid=uid, uid_validity=uid_validity, raw=raw, message_hash=h)
+        return cls(
+            uid=uid,
+            uid_validity=uid_validity,
+            raw=raw,
+            message_hash=h,
+            is_seen=is_seen,
+        )
 
 
 def get_uid_validity(
@@ -129,11 +154,14 @@ def fetch_messages(
         def fetch_one() -> Iterator[FetchedMessage]:
             try:
                 for uid in uids:
-                    _, parts = conn.uid("FETCH", str(uid), "(RFC822)")
+                    _, parts = conn.uid("FETCH", str(uid), "(FLAGS RFC822)")
                     raw = _extract_rfc822(parts)
                     if not raw:
                         continue
-                    yield FetchedMessage.from_raw(uid, uid_validity, raw)
+                    is_seen = _extract_flags_seen(parts)
+                    yield FetchedMessage.from_raw(
+                        uid, uid_validity, raw, is_seen=is_seen
+                    )
             finally:
                 try:
                     conn.logout()

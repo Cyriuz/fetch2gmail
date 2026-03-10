@@ -27,7 +27,7 @@ from .env_file import set_encrypted_env
 from .gmail_client import get_gmail_service
 from .imap_client import get_uid_validity
 from .log_buffer import get_recent_logs, install_log_buffer
-from .run import run_once, setup_logging
+from .run import run_once, run_copy_all, setup_logging
 from .ui_auth import create_ui_auth, load_ui_auth, verify_ui_auth
 
 logger = logging.getLogger(__name__)
@@ -626,6 +626,11 @@ def api_config_update(request: Request, update: ConfigUpdate) -> dict[str, str]:
     return {"status": "ok"}
 
 
+class CopyAllBody(BaseModel):
+    """Body for copy-all: copy every message from ISP to Gmail (with optional delete after)."""
+    delete_after: bool = False
+
+
 @app.post("/api/fetch")
 def api_fetch(request: Request, dry_run: bool = False) -> dict[str, Any]:
     """Trigger one fetch cycle. Optionally dry_run."""
@@ -635,6 +640,26 @@ def api_fetch(request: Request, dry_run: bool = False) -> dict[str, Any]:
     install_log_buffer()
     try:
         result = run_once(config_path=str(_get_config_path()), dry_run=dry_run)
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/fetch/copy-all")
+def api_fetch_copy_all(request: Request, body: CopyAllBody) -> dict[str, Any]:
+    """Copy all emails from ISP mailbox to Gmail (not just new). Skips already in Gmail. Optionally delete from ISP after."""
+    if not _require_auth(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    setup_logging()
+    install_log_buffer()
+    try:
+        result = run_copy_all(
+            config_path=str(_get_config_path()),
+            delete_after_import=body.delete_after,
+            dry_run=False,
+        )
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -752,6 +777,13 @@ _HTML_PAGE = """
     <p id="status">Loading...</p>
     <button type="button" id="btnFetch">Run fetch now</button>
     <button type="button" id="btnDryRun">Dry run (no import/delete)</button>
+    <div style="margin-top:1rem;">
+      <h3 style="font-size:1rem; margin-bottom:0.5rem;">Copy all emails from ISP to Gmail</h3>
+      <p class="hint" style="font-size:0.85rem; color:#666; margin:0.25rem 0;">Fetches every message in the mailbox (not just new). Read/unread is preserved. Skips messages already in Gmail.</p>
+      <label style="display:inline-block; margin-top:0.5rem;"><input type="checkbox" id="copy_all_delete_after"> Delete from ISP after copying</label>
+      <button type="button" id="btnCopyAll" style="margin-left:0.5rem;">Copy all now</button>
+      <p id="copyAllMsg" class="status" style="margin-top:0.5rem;"></p>
+    </div>
   </section>
 
   <section>
@@ -971,6 +1003,37 @@ _APP_JS = r"""
       document.getElementById('status').textContent = 'Error: ' + ((e.detail && e.detail.detail) ? e.detail.detail : e.message);
       document.getElementById('status').className = 'error';
       loadLogs();
+    });
+  };
+  document.getElementById('btnCopyAll').onclick = function() {
+    var msgEl = document.getElementById('copyAllMsg');
+    var deleteAfter = document.getElementById('copy_all_delete_after').checked;
+    msgEl.textContent = 'Copying all...';
+    msgEl.className = 'status';
+    document.getElementById('btnCopyAll').disabled = true;
+    fetch('/api/fetch/copy-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete_after: deleteAfter })
+    }).then(function(r) {
+      if (r.status === 401) { location.href = '/'; return; }
+      return r.json();
+    }).then(function(j) {
+      if (j.error) {
+        msgEl.textContent = 'Error: ' + j.error;
+        msgEl.className = 'error';
+      } else {
+        msgEl.textContent = 'Imported: ' + j.imported + ', Skipped (already in Gmail): ' + j.skipped_duplicate + ', Deleted from ISP: ' + j.deleted + '.';
+        msgEl.className = 'ok';
+      }
+      loadStatus();
+      loadLogs();
+    }).catch(function(e) {
+      msgEl.textContent = 'Error: ' + ((e.detail && e.detail.detail) ? e.detail.detail : e.message || 'request failed');
+      msgEl.className = 'error';
+      loadLogs();
+    }).then(function() {
+      document.getElementById('btnCopyAll').disabled = false;
     });
   };
   document.getElementById('gmail_use_label').onchange = function() {
