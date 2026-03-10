@@ -32,6 +32,9 @@ from .ui_auth import create_ui_auth, load_ui_auth, verify_ui_auth
 
 logger = logging.getLogger(__name__)
 
+# Prevents multiple "Copy all" runs from overlapping (manual button only).
+_copy_all_lock = threading.Lock()
+
 
 def _poller_loop(stop_event: threading.Event) -> None:
     """Background thread: every poll_interval_minutes run a fetch when config exists.
@@ -655,11 +658,12 @@ def api_fetch_copy_all(request: Request, body: CopyAllBody) -> dict[str, Any]:
     setup_logging()
     install_log_buffer()
     try:
-        result = run_copy_all(
-            config_path=str(_get_config_path()),
-            delete_after_import=body.delete_after,
-            dry_run=False,
-        )
+        with _copy_all_lock:
+            result = run_copy_all(
+                config_path=str(_get_config_path()),
+                delete_after_import=body.delete_after,
+                dry_run=False,
+            )
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
