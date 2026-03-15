@@ -58,6 +58,9 @@ def run_once(config_path: str | None = None, dry_run: bool = False) -> dict[str,
     db_path = state_cfg.get("db_path", "state.db")
     mailbox = imap_cfg.get("mailbox", "INBOX")
     delete_after_import = imap_cfg.get("delete_after_import", True)
+    since_date = imap_cfg.get("since_date")
+    if since_date == "":
+        since_date = None
     use_label = gmail_cfg.get("use_label") if "use_label" in gmail_cfg else bool((gmail_cfg.get("label") or "").strip())
     label_name = (gmail_cfg.get("label") or "ISP Mail").strip() if use_label else None
 
@@ -87,6 +90,7 @@ def run_once(config_path: str | None = None, dry_run: bool = False) -> dict[str,
             mailbox=mailbox,
             use_ssl=imap_cfg.get("use_ssl", True),
             last_processed_uid=last_uid,
+            since=since_date,
         )
     except Exception as e:
         logger.exception("IMAP fetch failed: %s", e)
@@ -226,6 +230,9 @@ def run_copy_all(
     state_cfg = cfg.get("state", {})
     db_path = state_cfg.get("db_path", "state.db")
     mailbox = imap_cfg.get("mailbox", "INBOX")
+    since_date = imap_cfg.get("since_date")
+    if since_date == "":
+        since_date = None
     use_label = gmail_cfg.get("use_label") if "use_label" in gmail_cfg else bool((gmail_cfg.get("label") or "").strip())
     label_name = (gmail_cfg.get("label") or "ISP Mail").strip() if use_label else None
 
@@ -254,6 +261,7 @@ def run_copy_all(
             mailbox=mailbox,
             use_ssl=imap_cfg.get("use_ssl", True),
             last_processed_uid=None,
+            since=since_date,
         )
     except Exception as e:
         logger.exception("IMAP fetch failed: %s", e)
