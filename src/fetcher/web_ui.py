@@ -658,13 +658,17 @@ def api_config_update(request: Request, update: ConfigUpdate) -> dict[str, str]:
         imap["username"] = update.imap_username
     if update.imap_mailbox is not None:
         imap["mailbox"] = update.imap_mailbox
-    if update.imap_since_date is not None:
-        try:
-            if update.imap_since_date != "":
+    # UI always sends imap_since_date (string or null). null/"" clears the filter.
+    if "imap_since_date" in update.model_fields_set:
+        if update.imap_since_date:
+            try:
                 datetime.date.fromisoformat(update.imap_since_date)
-        except Exception:
-            raise HTTPException(status_code=400, detail="since_date must be YYYY-MM-DD")
-        cfg.setdefault("imap", {})["since_date"] = update.imap_since_date
+            except Exception:
+                raise HTTPException(status_code=400, detail="since_date must be YYYY-MM-DD")
+            cfg.setdefault("imap", {})["since_date"] = update.imap_since_date
+        else:
+            cfg.setdefault("imap", {})["since_date"] = None
+
     if update.imap_use_ssl is not None:
         imap["use_ssl"] = update.imap_use_ssl
     if update.delete_after_import is not None:
@@ -939,7 +943,7 @@ _HTML_PAGE = """
       <label>IMAP password <input id="s_imap_password" type="password" placeholder="Stored encrypted in .env"></label>
       <label>Mailbox <input id="s_imap_mailbox" type="text" value="INBOX" title="IMAP folder to fetch from. INBOX is the main inbox where new mail arrives."></label>
       <p class="hint" style="font-size:0.85rem; color:#666; margin-top:0;">Mailbox is the IMAP folder to fetch from. <strong>INBOX</strong> is the main inbox where new mail arrives at your ISP; leave as INBOX unless you use a different folder.</p>
-      <label>Only fetch mail newer than <input id="s_imap_since_date" type="date"></label>
+      <label>Only fetch mail on or after <input id="s_imap_since_date" type="date"></label>
       <label style="margin-top:1rem;"><input type="checkbox" id="s_delete_after_import" checked> Delete emails from ISP after importing to Gmail</label>
       <label><input type="checkbox" id="s_gmail_use_label"> Add a Gmail label to imported mail</label>
       <div id="s_gmail_label_row" style="display:none;"><label>Label name <input id="s_gmail_label" type="text" value="ISP Mail" placeholder="e.g. ISP Mail"></label></div>
@@ -1011,7 +1015,7 @@ _HTML_PAGE = """
     <label>IMAP password <input id="imap_password" type="password" placeholder="Leave blank to keep current (stored encrypted)"></label>
     <label>Mailbox <input id="imap_mailbox" type="text" title="IMAP folder to fetch from. INBOX = main inbox."></label>
     <p class="hint" style="font-size:0.85rem; color:#666; margin-top:0;">Mailbox is the IMAP folder to fetch from. <strong>INBOX</strong> = main inbox where new mail arrives.</p>
-    <label>Only fetch mail newer than <input id="imap_since_date" type="date"></label>
+    <label>Only fetch mail on or after <input id="imap_since_date" type="date"></label>
     <label style="margin-top:1rem;"><input type="checkbox" id="delete_after_import"> Delete emails from ISP after importing to Gmail</label>
     <label><input type="checkbox" id="gmail_use_label"> Add a Gmail label to imported mail</label>
     <div id="gmail_label_row" style="display:none;"><label>Label name <input id="gmail_label" type="text" placeholder="e.g. ISP Mail"></label></div>

@@ -103,13 +103,20 @@ def get_uid_validity(
             pass
 
 
+# IMAP date-month names must be English (RFC 3501); do not use locale-dependent %b.
+_IMAP_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
 def _format_imap_date(date_val: str | datetime.date) -> str:
-    """Convert an ISO date string or date object to IMAP DD-MMM-YYYY."""
+    """Convert an ISO date string or date object to IMAP DD-MMM-YYYY (English months)."""
     if isinstance(date_val, str):
         date_val = datetime.date.fromisoformat(date_val)
     if not isinstance(date_val, datetime.date):
         raise TypeError("since_date must be a date or ISO date string")
-    return date_val.strftime("%d-%b-%Y")
+    return f"{date_val.day:02d}-{_IMAP_MONTHS[date_val.month - 1]}-{date_val.year}"
 
 
 def fetch_messages(
