@@ -235,7 +235,21 @@ def _cmd_auth(args: argparse.Namespace) -> None:
     from .auth_server import app
 
     cred_path = Path(args.credentials).resolve()
-    token_path = Path(args.token).resolve()
+    # If the user did not override --token (still default "token.json"), automatically pick
+    # token.json, token2.json, token3.json, ... in the current directory, so additional
+    # accounts are easy to add without manually specifying --token.
+    if args.token == "token.json":
+        base_dir = Path.cwd()
+        idx = 0
+        while True:
+            name = "token.json" if idx == 0 else f"token{idx + 1}.json"
+            candidate = base_dir / name
+            if not candidate.exists():
+                token_path = candidate
+                break
+            idx += 1
+    else:
+        token_path = Path(args.token).resolve()
     if not cred_path.exists():
         print(f"Credentials file not found: {cred_path}", file=sys.stderr)
         print("Download credentials.json from Google Cloud (OAuth client, Web application).", file=sys.stderr)
@@ -252,8 +266,9 @@ def _cmd_auth(args: argparse.Namespace) -> None:
         webbrowser.open(url)
 
     threading.Thread(target=open_browser, daemon=True).start()
-    print(f"Opening {url} in your browser. Sign in with Google; token will be saved to {token_path}")
-    print("Then copy credentials.json and token.json to your Odroid. Press Ctrl+C when done.")
+    token_name = token_path.name
+    print(f"Opening {url} in your browser. Sign in with Google; {token_name} will be saved to {token_path}")
+    print(f"Then copy credentials.json and {token_name} to your Odroid. Press Ctrl+C when done.")
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
@@ -271,7 +286,8 @@ def _write_default_config(dest: Path) -> None:
             "delete_after_import": True,
             "since_date": None,
         },
-        "gmail": {"use_label": False, "label": "ISP Mail", "credentials_path": "credentials.json", "token_path": "token.json"},
+        # Canonical: gmail_accounts (multi-account). Single-account setups will have one entry.
+        "gmail_accounts": [{"use_label": False, "label": "ISP Mail", "credentials_path": "credentials.json", "token_path": "token.json"}],
         "state": {"db_path": "state.db"},
         "ui": {"host": "127.0.0.1", "port": 8765},
         "poll_interval_minutes": 5,
@@ -304,7 +320,7 @@ def config_wizard_interactive() -> None:
             "delete_after_import": True,
             "since_date": None,
         },
-        "gmail": {"use_label": bool(label), "label": label or "ISP Mail", "credentials_path": cred_path, "token_path": token_path},
+        "gmail_accounts": [{"use_label": bool(label), "label": label or "ISP Mail", "credentials_path": cred_path, "token_path": token_path}],
         "state": {"db_path": db_path},
         "ui": {"host": "127.0.0.1", "port": 8765},
         "poll_interval_minutes": 5,

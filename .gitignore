@@ -6,8 +6,9 @@ config.json
 *.db
 state.db
 credentials.json
-token.json
+token*.json
 *.pem
+.cursor
 
 # Python
 __pycache__/
